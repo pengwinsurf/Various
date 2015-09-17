@@ -5,22 +5,58 @@ import re
 import logging
 import sys
 import binascii
+import datetime 
 
 log = logging.getLogger()
 
 
 desc = "PE Dump is a swiss knife analysis tool for PE files"
 
+def analyze(rva_offset,size,pe32):
 
-def hextobytes(enc_str):
-	result = []
-	s_len = len(enc_str)
-	if s_len > 2:
-		j = s_len / 2
-		for x in xrange(j):
-			result.append(int(enc_str[(x*2):(2+x*2)],base=16))
+	data = pe32.get_data(rva_offset,size)
+	hex_data = binascii.hexlify(data)
+	section = pe32.get_section_by_rva(rva_offset)
+	data_entropy = section.entropy_H(data)
+	log.info("Data Entropy: %f",data_entropy)
 
-	return str(bytearray(result))
+	if hex_data[:2] == '4D5A':
+		log.warning("Found MZ at start of RVA: %s", hex(rva_offset))
+
+	if 'aPLib'.encode('hex') in hex_data: # aPLib
+		log.warning("Potentially aPLib compressed data found at RVA: %s", rva_offset)
+
+	if 'This program cannot be run in DOS mode'.encode('hex') in hex_data:
+		log.warning("Potential DOS header found in data at RVA: %s", rva_offset)
+
+	return data
+
+
+def read_resources(rsrc_dir,pe32,depth):
+		for entry in rsrc_dir.entries:
+			try:
+				rsrc_data = entry.data
+				log.info("Lang: %s", pefile.LANG[rsrc_data.lang])
+				log.info("Size: %s", hex(rsrc_data.struct.Size))
+				analyze(rsrc_data.struct.OffsetToData,rsrc_data.struct.Size,pe32)
+				log.info("--------------\n")
+				return
+
+			except AttributeError:
+				if depth == 0:
+					if entry.name:
+						log.info("Resource Name: %s", entry.name)
+					else:
+						log.info("Resource ID %s  - Type: %s",hex(entry.id),pefile.RESOURCE_TYPE[entry.id])
+				else:
+					if entry.name:
+						log.info("Child Resource Name: %s\n", entry.name)
+					else:
+						log.info("Child Resource ID:  %s", entry.id)
+
+				depth += 1
+				read_resources(entry.directory,pe32,depth)
+				depth = depth - 1
 
 def main():
 
@@ -52,18 +88,18 @@ def main():
 		log.warning('CheckSum mismatch. CheckSum value in header = %s',(hex(pe32.OPTIONAL_HEADER.CheckSum)))
 
 	ep = pe32.OPTIONAL_HEADER.AddressOfEntryPoint
-	log.debug('EP= %s',hex(ep))
 	ep_section = pe32.get_section_by_rva(ep)
 
 	if ep_section.Name != pe32.sections[0].Name:
 		log.warning('Entry point not in first section')
 
+	log.info("Compile date: %s",datetime.date.fromtimestamp(pe32.FILE_HEADER.TimeDateStamp))
 	if pe32.is_dll():
-		log.info("File Type: DLL")
+		log.info("File Type: DLL\n")
 	elif pe32.is_driver():
-		log.info("File Type: Driver")
+		log.info("File Type: Driver\n")
 	elif pe32.is_exe():
-		log.info("File Type: EXE")
+		log.info("File Type: EXE\n")
 
 	temp  = []
 	for section in pe32.sections:
@@ -117,10 +153,66 @@ def main():
 				data = pe32.get_data(offset_rva,slack_size)
 				log.warning('Data: %s ...',(binascii.hexlify(data[1:64])))
 
+	log.info("\n")
 	log.info("=== Version Info ===")
-	# for info in pe32.FileInfo:
-	# 	log.debug('Struct %s',info)
 
+	try:
+		for info in pe32.FileInfo:
+			if info.Key == 'StringFileInfo':
+				for ver in info.StringTable:
+					for label,data in ver.entries.iteritems():
+
+						if 'Microsoft' in data:
+							MicrosoftVersionInfo = True
+
+						if 'Adobe' in data:
+							AdobeVersionInfo = True
+
+						log.info("%s : %s",label,data)
+		# elif info.Key == 'VarFileInfo':
+		# 	for ver in info.Var:
+		# 		for key,val in ver.entry.iteritems():
+		# 			log.info("%s : %s", key, val)
+	except AttributeError:
+		log.info("No Version Information found")
+
+
+
+	log.info("==================\n")
+
+	### Resources
+
+	log.info("=== Resources ===")
+
+	rsrc_dir = pe32.OPTIONAL_HEADER.DATA_DIRECTORY[2]
+	rsrc_root = pe32.parse_resources_directory(rva=rsrc_dir.VirtualAddress)
+	if rsrc_root:
+		log.info("Number of rsrcs: %s \n",rsrc_root.struct.NumberOfNamedEntries + rsrc_root.struct.NumberOfIdEntries)
+		depth = 0
+		read_resources(rsrc_root,pe32,depth)
+		log.info("****** Resources Strings *******")
+		strings = pe32.get_resources_strings()
+		if not strings:
+			log.info("No strings found")
+		else:
+			for string in strings:
+				log.info("%s", string)
+
+	else:
+		log.info("No resources found")
+
+	log.info("==================\n")
+
+
+	## Find PDB data
+	for debug in pe32.DIRECTORY_ENTRY_DEBUG:
+		if pefile.DEBUG_TYPE[debug.struct.Type] == 'IMAGE_DEBUG_TYPE_CODEVIEW':
+			data = pe32.get_data(debug.struct.AddressOfRawData)
+			hex_data = binascii.hexlify(data)
+			if 'RSDS'.encode('hex') == hex_data[:8]:
+				print hex_data[8:16]
+			elif 'NB10'.encode('hex') == hex_data[:8]:
+				pass
 
 
 
