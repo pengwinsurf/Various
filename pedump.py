@@ -24,105 +24,123 @@ class File(object):
 
 	def __init__(self,path):
 		self.pe = pefile.PE(path)
-		self.traits = {}
+		self.genes = {}
+		self.info = {}
 
-	def __basic_checks(self):
+	def __check_genes(self):
+		"""
+			* Checks if the checksum in the Optional_header != the actual checksum
+			* Checks if the EP is not in the first section
+		"""
 		generated = self.pe.generate_checksum()
 		if self.pe.OPTIONAL_HEADER.CheckSum != generated:
 			log.warning('CheckSum mismatch. CheckSum value in header = %s',(hex(self.pe.OPTIONAL_HEADER.CheckSum)))
-			self.traits['BAD_CHECKSUM'] = True
+			self.genes['BAD_CHECKSUM'] = True
 
 		ep = self.pe.OPTIONAL_HEADER.AddressOfEntryPoint
 		ep_section = self.pe.get_section_by_rva(ep)
 
 		if ep_section.Name != self.pe.sections[0].Name:
 			log.warning('Entry point not in first section')
-			self.traits['EP_NOT_1st_SECTION'] = True
+			self.genes['EP_NOT_1st_SECTION'] = True
 
-	def basic_info(self):
+	def __basic_info(self):
+		"""
+			* Reads attributes from PE header and File header
+		"""
 		log.info("Compile date: %s",datetime.date.fromtimestamp(self.pe.FILE_HEADER.TimeDateStamp))
-		self.traits['COMPILE_DATE'] = datetime.date.fromtimestamp(self.pe.FILE_HEADER.TimeDateStamp)
+		self.info['COMPILE_DATE'] = datetime.date.fromtimestamp(self.pe.FILE_HEADER.TimeDateStamp)
 		if self.pe.is_dll():
 			log.info("File Type: DLL\n")
-			self.traits['DLL'] = True
+			self.info['FileType'] = "DLL"
 		elif self.pe.is_driver():
 			log.info("File Type: Driver\n")
-			self.traits['DRIVER'] = True
+			self.info['FileType'] = "Driver"
 		elif self.pe.is_exe():
 			log.info("File Type: EXE\n")
-			self.traits['EXE'] = True
+			self.info['FileType'] = "EXE"
 
-		self.__basic_checks()
+		self.__check_genes()
 
-	def read_sections(self):
-		temp  = []
+	def __read_sections(self):
+		"""
+			Walks the PE sections loading standard info into the info dict and looking for anomalies
+		"""
+		self.info["Sections"] = []
 		for section in self.pe.sections:
 			log.info('Section: %s, Size: %s, Entropy %f',section.Name,hex(section.SizeOfRawData),section.get_entropy())
-			sec_dict = {'name': section.Name, 'start': section.PointerToRawData, 'end': section.PointerToRawData+section.SizeOfRawData}
+			sec_dict = {'name': section.Name, 'start': hex(section.PointerToRawData), 'end': hex(section.PointerToRawData+section.SizeOfRawData), 
+			'size': hex(section.SizeOfRawData), 'entropy': section.get_entropy()}
 
 			if section.SizeOfRawData == 0:
 				log.warning('Section %s has Zero size !',section.Name)
-				self.traits['ZERO_SIZE_SECTION'] = section.Name
+				self.genes['ZERO_SIZE_SECTION'] = section.Name
 
 			if section.IMAGE_SCN_MEM_EXECUTE:
 				if section.SizeOfRawData <= int('200',16):
 					log.warning('Executable section %s with size less than 0x200',section.Name)
-					self.traits['X_SECTION_SMALLER_THAN_200'] = section.Name
+					self.genes['X_SECTION_SMALLER_THAN_200'] = section.Name
 
 				if '.text' not in section.Name:
 					log.warning('Non .text executable section %s ',section.Name)
 					if 'OTHER_X_SECTION' in self.traits:
-						self.traits['MULTIPLE_X_SECTIONS'] = True
+						self.genes['MULTIPLE_X_SECTIONS'] = True
 					else:
-						self.traits['OTHER_X_SECTION'] = section.Name
+						self.genes['OTHER_X_SECTION'] = section.Name
 
 			if section.Name.startswith('.text'):
 				#https://msdn.microsoft.com/en-us/library/windows/desktop/ms680341(v=vs.85).aspx
 
 				if not section.IMAGE_SCN_CNT_CODE:
 					log.warning('.text section not marked as code')
-					self.traits['TEXT_SECTION_NOT_MARKED_CODE'] = True
+					self.genes['TEXT_SECTION_NOT_MARKED_CODE'] = True
 
 				if section.IMAGE_SCN_MEM_WRITE:
 					log.warning('Writable .text section')
-					self.traits['TEXT_SECTION_WRITABLE'] = True
+					self.genes['TEXT_SECTION_WRITABLE'] = True
 
 				if not section.IMAGE_SCN_MEM_READ:
 					log.warning('.text section not readable')
-					self.traits['TEXT_SECTION_NOT_READABLE'] = True
+					self.genes['TEXT_SECTION_NOT_READABLE'] = True
 
 
 				if not section.IMAGE_SCN_MEM_EXECUTE:
 					log.warning('.text section not executable')
-					self.traits['TEXT_SECTION_NOT_X'] = True
+					self.genes['TEXT_SECTION_NOT_X'] = True
 
 
 			elif section.Name.startswith('.data'):
 
 				if section.IMAGE_SCN_MEM_EXECUTE:
 					log.warning('.data section executable')
-					self.traits['DATA_SECTION_X'] = True
+					self.genes['DATA_SECTION_X'] = True
 
 				if not section.IMAGE_SCN_MEM_READ:
 					log.warning('.data section not readable')
-					self.traits['DATA_SECTION_NOT_READABLE'] = True
+					self.genes['DATA_SECTION_NOT_READABLE'] = True
 
 
-			temp.append(sec_dict)
-			if len(temp) > 1:
+			self.info["Sections"].append(sec_dict)
+
+			if len(self.info["Sections"]) > 1:
+				temp = self.info["Sections"]
+
 				current_section  = temp[-1]
 				previous_section = temp[-2]
 				if hex(previous_section['end']) < hex(current_section['start']):
 					log.warning('Found slack space !')
 					slack_size = current_section['start'] - previous_section['end']
 					log.warning('Start offset: %s, Size: %s',hex(previous_section['end']),hex(slack_size))
-					self.traits['SLACK_SPACE'] = slack_size
+					self.genes['SLACK_SPACE'] = slack_size
 					offset_rva = self.pe.get_rva_from_offset(previous_section['end'])
 					data = self.pe.get_data(offset_rva,slack_size)
 					log.warning('Data: %s ...',(binascii.hexlify(data[1:64])))
-					self.traits['SLACK_DATA'] = data
+					self.genes['SLACK_DATA'] = data
 
 	def analyze_data(self,rva_offset,size):
+		"""
+			Given an offset and a size look for MZ in that region and returns the data blob back
+		"""
 
 		data = self.pe.get_data(rva_offset,size)
 		hex_data = binascii.hexlify(data)
@@ -132,44 +150,59 @@ class File(object):
 
 		if hex_data[:2] == '4D5A':
 			log.warning("Found MZ at start of RVA: %s", hex(rva_offset))
-			self.traits['MZ_IN_DATA_BLOCK'] = rva_offset
+			self.genes['MZ_IN_DATA_BLOCK'] = rva_offset
 
 		if 'aPLib'.encode('hex') in hex_data: # aPLib
 			log.warning("Potentially aPLib compressed data found at RVA: %s", rva_offset)
-			self.traits['APLIB_COMPRESSED_DATA'] = rva_offset
+			self.genes['APLIB_COMPRESSED_DATA'] = rva_offset
 
 		if 'This program cannot be run in DOS mode'.encode('hex') in hex_data:
 			log.warning("Potential DOS header found in data at RVA: %s", rva_offset)
-			self.traits['DOS_HEADER_IN_DATA'] = rva_offset
+			self.genes['DOS_HEADER_IN_DATA'] = rva_offset
 
 		return data
 
 	def __walk_resources(self,rsrc_dir,depth):
+		"""
+
+		"""
 
 		for entry in rsrc_dir.entries:
+			rc_entry = {}
 			try:
+				rc_entry
 				rsrc_data = entry.data
 				log.info("Lang: %s", pefile.LANG[rsrc_data.lang])
 				if pefile.LANG[rsrc_data.lang] is not 'LANG_ENGLISH':
-					self.traits['NON_ENGLISH_RSRCS_LANG'] = pefile.LANG[rsrc_data.lang]
+					self.genes['NON_ENGLISH_RSRCS_LANG'] = pefile.LANG[rsrc_data.lang]
+
 				log.info("Size: %s", hex(rsrc_data.struct.Size))
+
 				self.analyze_data(rsrc_data.struct.OffsetToData,rsrc_data.struct.Size)
 				log.info("--------------\n")
 				return
 
 			except AttributeError:
 				if depth == 0:
+					rc_entry = {}
 					if entry.name:
 						log.info("Resource Name: %s", entry.name)
+						rc_entry["Name"] = entry.name
+
 					else:
 						log.info("Resource ID %s  - Type: %s",hex(entry.id),pefile.RESOURCE_TYPE[entry.id])
+						rc_entry["ID"] = hex(entry.id)
+						rc_entry["Type"] = pefile.RESOURCE_TYPE[entry.id] 
 						if pefile.RESOURCE_TYPE[entry.id] == 'RCDATA':
-							self.traits['RCDATA_IN_RESOURCES'] = True
+							self.info['RCDATA_IN_RESOURCES'] = True
+
 				else:
 					if entry.name:
 						log.info("Child Resource Name: %s\n", entry.name)
 					else:
 						log.info("Child Resource ID:  %s", entry.id)
+			
+			self.info["RSRC"].append(rc_entry)
 
 				depth += 1
 				self.__walk_resources(entry.directory,depth)
@@ -206,8 +239,9 @@ class File(object):
 		rsrc_dir = self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[2]
 		rsrc_root = self.pe.parse_resources_directory(rva=rsrc_dir.VirtualAddress)
 		if rsrc_root:
+			self.info["RSRC"] = []
 			log.info("Number of rsrcs: %s \n",rsrc_root.struct.NumberOfNamedEntries + rsrc_root.struct.NumberOfIdEntries)
-			self.traits['NUMBER_OF_RSRCS'] = rsrc_root.struct.NumberOfNamedEntries + rsrc_root.struct.NumberOfIdEntries
+			self.info['NUMBER_OF_RSRCS'] = rsrc_root.struct.NumberOfNamedEntries + rsrc_root.struct.NumberOfIdEntries
 			depth = 0
 			self.__walk_resources(rsrc_root,depth)
 			log.info("****** Resources Strings *******")
@@ -215,12 +249,13 @@ class File(object):
 			if not strings:
 				log.info("No strings found")
 			else:
-				self.traits['STRINGS_IN_RSRCS'] = True
+				self.info['STRINGS_IN_RSRCS'] = True
 				for string in strings:
 					log.info("%s", string)
 
 		else:
 			log.info("No resources found")
+			self.info["RSRC"] = None
 
 		log.info("==================\n")
 
@@ -288,6 +323,7 @@ def main():
 	parser = argparse.ArgumentParser(prog = 'PE Dump', description='{0}'.format(desc), epilog = 'Copyright amz 2015')
 	parser.add_argument('pefile', help='The PE file to disect.')
 	parser.add_argument('-s', '--signatures', help='Path to PEID signatures file')
+	parser.add_argument('-vt', help='Check virustotal detections')
 	# parser.add_argument('-s', '--search', choices=['email','files', 'group', 'actors'], help='Searches MATI reports by type of value')
 	# parser.add_argument('-f', '--file',help='Json File to include result')
 	options = parser.parse_args()
