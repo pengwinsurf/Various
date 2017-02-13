@@ -1,0 +1,52 @@
+$$ Walk all _driver_objects from nt!ObpRootDirectoryObject
+.echo ;
+.echo Print loaded kernel modules and potential hooks - amz 2015
+.echo ;
+.if ( (poi(nt!NtMajorVersion)!=5) and (poi(nt!NtMinorVersion)!=1) )
+{
+	.printf "This script currently only runs on XP"
+	q
+}
+r $t1 = poi(nt!ObpRootDirectoryObject)
+r? $t2 = (nt!_OBJECT_DIRECTORY*) @$t1
+r? $t3 =  (nt!_OBJECT_DIRECTORY_ENTRY* )@$t2->HashBuckets[16]
+r $t7 = @@c++(@$t3->Object)
+!object @$t7
+.foreach /pS 1b  (Address {!object @$t7}) 
+{
+	.if ($spat("${Address}","8[0-f][0-f][0-f][0-f][0-f][0-f][0-f]"))
+	{
+		.catch
+		{
+			r $t1=${Address}
+			r $t2 = @@c++(((nt!_DRIVER_OBJECT*) @$t1)->DriverStart)
+			r $t3 = @@c++(((nt!_DRIVER_OBJECT*) @$t1)->DriverSize)
+			.if ((@$t2!=0) & (@$t3!=0))
+			{
+				.foreach /pS 12 (irp {!drvobj ${Address} 2})
+				{
+					.if ($spat("${irp}","[0-f][0-f][0-f][0-f][0-f][0-f][0-f][0-f]"))
+					{
+							r $t0 = @$t3+@$t2
+							r $t5 = ${irp}
+							 aS /c ${/v:Result}  ln @$t5
+							 .block
+							 {
+								.if ( ( @$t5<@$t2 | @$t5>@$t0 ) and (not $spat("${Result}","*Exact matches*")) )
+								{
+									.echo "****************************"
+									.printf "Potential Hook %p at %p\n",@$t5,${Address}				
+									.echo ${Result}
+									.printf "DriverStart: %N\n",@$t2
+									.printf "DriverEnd: %N\n",@$t0
+									.printf "IRP Address: %N\n",@$t5
+									.echo "****************************"		
+								}
+							 }
+							 ad ${/v:Result}
+					}
+				}
+			}		
+		}
+	}		
+}
