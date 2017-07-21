@@ -1,11 +1,13 @@
+/*
+ * @Author: Pengwinsurf 
+ * @Date: 2017-07-21 16:08:49 
+ * @Last Modified by:   Pengwinsurf 
+ * @Last Modified time: 2017-07-21 16:08:49 
+ */
 import argparse
 import pefile
 import os
 
-
-__author__ = "Ahmed Zaki"
-__date__ = "July 2017"
-__ver__ = "0.1"
 
 class IMEX():
 
