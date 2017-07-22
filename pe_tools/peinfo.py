@@ -1,16 +1,18 @@
-#!/usr/bin/python 
+#!/usr/bin/python
 
 """ Script to extract information from a PE file """
 
 import argparse
 import os
+import binascii
 import pefile
 
 __author__ = "Pengwinsurf"
 __copyright__ = "Copyright 2017"
 __license__ = "MIT"
-__version__ = "0.2"
+__version__ = "0.3"
 __date__ = "22 July 2017"
+
 
 class PeInfo():
 
@@ -19,9 +21,8 @@ class PeInfo():
         self.expDirEnt = self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[0]
         self.impDirEnt = self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[1]
 
-
     def _print_table(self, table):
-        """ Helper function to print tables. 
+        """ Helper function to print tables.
         Columns are Ordinal , VA, ExportName
         """
 
@@ -29,22 +30,22 @@ class PeInfo():
             print "%d\t0x%08x\t%s" % (item[0], item[1], item[2])
         print "--------"
 
-
     def _parse_directory_descriptor(self, structType, dirEntry):
-        """ Will parse the directory entry given a VA and size returning an instance of the 
+        """ Will parse the directory entry given a VA and size returning an instance of the
             directory descriptor
         """
-        
-        return self.pe.__unpack_data__(structType, self.pe.get_data( dirEntry.VirtualAddress, pefile.Structure(structType).sizeof() ), file_offset = self.pe.get_offset_from_rva(dirEntry.VirtualAddress) )
+
+        return self.pe.__unpack_data__(structType, self.pe.get_data(dirEntry.VirtualAddress, pefile.Structure(structType).sizeof()), file_offset=self.pe.get_offset_from_rva(dirEntry.VirtualAddress))
 
     def _get_export_addresses(self):
-        """ Will walk the Function Table Addresses and return a list 
-            of each VA. 
+        """ Will walk the Function Table Addresses and return a list
+            of each VA.
         """
-        offset = 0 
+        offset = 0
         exportAddresses = []
         for x in xrange(self.exportDir.NumberOfFunctions):
-            exportAddresses.append(self.pe.get_dword_at_rva(self.exportDir.AddressOfFunctions+offset))
+            exportAddresses.append(self.pe.get_dword_at_rva(
+                self.exportDir.AddressOfFunctions + offset))
             offset = offset + 4
 
         return exportAddresses
@@ -52,11 +53,12 @@ class PeInfo():
     def _get_export_names(self):
         """ Based on the number of names in the Export Directory descriptor,
          return all export names
-        """ 
-        offset = 0 
+        """
+        offset = 0
         exportNames = []
         for x in xrange(self.exportDir.NumberOfNames):
-            nameAddress = self.pe.get_dword_at_rva(self.exportDir.AddressOfNames+offset)
+            nameAddress = self.pe.get_dword_at_rva(
+                self.exportDir.AddressOfNames + offset)
             exportNames.append(self.pe.get_data(nameAddress).split('\x00')[0])
             offset = offset + 4
 
@@ -65,14 +67,56 @@ class PeInfo():
     def _print_verinfo(self):
         """ Print version information is the file has any """
 
+        print "\nVERSION INFORMATION"
         if hasattr(self.pe, 'FileInfo'):
-            print "\nVERSION INFORMATION"
             for fileInfo in self.pe.FileInfo:
                 if fileInfo.Key == 'StringFileInfo':
                     for vInfo in fileInfo.StringTable:
                         for info in vInfo.entries.items():
                             print "%s:\t%s" % (info[0], info[1])
-            print "--------"
+        else:
+            print "No Version Information"
+        print "--------"
+
+    def __print_debug_data(self):
+        """ Print out Debug data if present """
+        print "\nDEBUG INFO"
+
+        try:
+            for debug in self.pe.DIRECTORY_ENTRY_DEBUG:
+                if pefile.DEBUG_TYPE[debug.struct.Type] == 'IMAGE_DEBUG_TYPE_CODEVIEW':
+                    data = self.pe.get_data(debug.struct.AddressOfRawData)
+                    hex_data = binascii.hexlify(data)
+                    if 'RSDS'.encode('hex') == hex_data[:8]:
+                                # struct CV_INFO_PDB70
+                                # {
+                            # 			DWORD  CvSignature;
+                            # 			GUID Signature;
+                            # 			DWORD Age;
+                            # 			BYTE PdbFileName[];
+                                # } ;
+
+                        temp_hex = binascii.hexlify(data[24:]).rstrip('0000')
+                        raw_pdb = binascii.unhexlify(temp_hex)
+                        print "PDB file: %s" % raw_pdb.split('\x00')[0].encode('utf-8')
+
+                    elif 'NB10'.encode('hex') == hex_data[:8]:
+                            # 	struct CV_INFO_PDB20
+                            # {
+                        # 			CV_HEADER CvHeader;
+                        # 			DWORD Signature;
+                        # 			DWORD Age;
+                        # 			BYTE PdbFileName[];
+                            # };
+                        temp_hex = binascii.hexlify(data[16:]).rstrip('0000')
+                        raw_pdb = binascii.unhexlify(temp_hex)
+                        print "PDB file: %s" % raw_pdb.split('\x00')[0].encode('utf-8')
+
+        except AttributeError:
+            print "No Debug Information"
+
+        print "--------"
+
 
     def run(self):
 
@@ -88,8 +132,8 @@ class PeInfo():
             self.exportDir = self._parse_directory_descriptor(self.pe.__IMAGE_EXPORT_DIRECTORY_format__, self.expDirEnt)
             print "\nDLL NAME\n%s" % self.pe.get_data(self.exportDir.Name).split('\x00')[0]
             print "--------"
-            print "\nEXPORTS "
-            print "\n%s\n" % self.exportDir
+            print "\nEXPORTS\n"
+            # print "\n%s\n" % self.exportDir
             addressOfFunctions = self._get_export_addresses()
             exportNames = self._get_export_names()
             fullExports = []
@@ -100,6 +144,8 @@ class PeInfo():
             self._print_table(fullExports)
 
         self._print_verinfo()
+
+        self.__print_debug_data()
 
 def main():
 
