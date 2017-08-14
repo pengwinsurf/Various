@@ -5,18 +5,22 @@
 import argparse
 import os
 import binascii
+
+
 import pefile
+from M2Crypto import *
 
 __author__ = "Pengwinsurf"
 __copyright__ = "Copyright 2017"
 __license__ = "MIT"
-__version__ = "0.3"
+__version__ = "0.2"
 __date__ = "22 July 2017"
 
 
 class PeInfo():
 
     def __init__(self, filePath):
+        self.filePath = os.path.abspath(filePath)
         self.pe = pefile.PE(os.path.abspath(filePath))
         self.expDirEnt = self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[0]
         self.impDirEnt = self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[1]
@@ -82,8 +86,8 @@ class PeInfo():
         """ Print out Debug data if present """
         print "\nDEBUG INFO"
 
-        try:
-            for debug in self.pe.DIRECTORY_ENTRY_DEBUG:
+        for debug in self.pe.DIRECTORY_ENTRY_DEBUG:
+            try:
                 if pefile.DEBUG_TYPE[debug.struct.Type] == 'IMAGE_DEBUG_TYPE_CODEVIEW':
                     data = self.pe.get_data(debug.struct.AddressOfRawData)
                     hex_data = binascii.hexlify(data)
@@ -112,11 +116,43 @@ class PeInfo():
                         raw_pdb = binascii.unhexlify(temp_hex)
                         print "PDB file: %s" % raw_pdb.split('\x00')[0].encode('utf-8')
 
-        except AttributeError:
-            print "No Debug Information"
+            except AttributeError, KeyError:
+                pass
+
 
         print "--------"
 
+
+    def _get_signature_info(self):
+        """ Check if a PE is signed and get information about the signature
+        """
+
+        print "\nCertificate information"
+        securityDir = self.pe.OPTIONAL_HEADER.DATA_DIRECTORY[4]
+
+        if (securityDir.VirtualAddress == 0 and securityDir.Size == 0):
+            print "No Authenticode found"
+            return 
+
+        offset = self.pe.get_offset_from_rva(securityDir.VirtualAddress)
+
+
+        with open(self.filePath, 'rb') as fh:
+            fh.seek(offset)
+            sig = fh.read(securityDir.Size)
+
+
+        with open('temp.sig', 'wb+') as fh:
+            fh.write(sig[8:])
+
+        p7 = SMIME.load_pkcs7_der('temp.sig')
+
+        signers = p7.get0_signers(X509.X509_Stack())
+
+        for cert in signers:
+            print "Issuer: %s " % cert.get_issuer().as_text()
+            print "Not After: %s " % cert.get_not_after()
+            print "Subject: %s " % cert.get_subject().as_text()
 
     def run(self):
 
@@ -146,6 +182,8 @@ class PeInfo():
         self._print_verinfo()
 
         self.__print_debug_data()
+
+        self._get_signature_info()
 
 def main():
 
